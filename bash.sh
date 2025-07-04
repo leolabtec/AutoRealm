@@ -21,6 +21,8 @@ if ! command -v curl &>/dev/null; then
         apt-get install curl -y
     elif command -v yum &>/dev/null; then
         yum install curl -y
+    elif command -v apk &>/dev/null; then
+        apk add curl
     else
         echo "❌ 错误：无法自动安装 curl，请手动安装 curl。"
         exit 1
@@ -30,6 +32,28 @@ fi
 # 验证 curl 是否安装成功
 if ! command -v curl &>/dev/null; then
     echo "❌ 错误：curl 安装失败，请手动安装 curl。"
+    exit 1
+fi
+
+# 检查并安装 gawk
+if ! command -v gawk &>/dev/null; then
+    echo "⏳ 检测到 gawk 未安装，正在尝试安装..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update
+        apt-get install gawk -y
+    elif command -v yum &>/dev/null; then
+        yum install gawk -y
+    elif command -v apk &>/dev/null; then
+        apk add gawk
+    else
+        echo "❌ 错误：无法自动安装 gawk，请手动安装 gawk。"
+        exit 1
+    fi
+fi
+
+# 验证 gawk 是否安装成功
+if ! command -v gawk &>/dev/null; then
+    echo "❌ 错误：gawk 安装失败，请手动安装 gawk。"
     exit 1
 fi
 
