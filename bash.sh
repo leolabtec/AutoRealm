@@ -13,6 +13,26 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# 检查并安装 curl
+if ! command -v curl &>/dev/null; then
+    echo "⏳ 检测到 curl 未安装，正在尝试安装..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update
+        apt-get install curl -y
+    elif command -v yum &>/dev/null; then
+        yum install curl -y
+    else
+        echo "❌ 错误：无法自动安装 curl，请手动安装 curl。"
+        exit 1
+    fi
+fi
+
+# 验证 curl 是否安装成功
+if ! command -v curl &>/dev/null; then
+    echo "❌ 错误：curl 安装失败，请手动安装 curl。"
+    exit 1
+fi
+
 # 创建目标目录（如果不存在）
 mkdir -p "$DEST_DIR"
 if [ ! -d "$DEST_DIR" ]; then
