@@ -20,62 +20,47 @@ urlencode() {
     done
 }
 
-# 检查端口是否被占用（TCP 和 UDP）
+# 检查端口是否被占用
 check_port() {
     local port=$1
-    if command -v ss >/dev/null 2>&1; then
-        if ss -tuln | grep -q ":${port}\b"; then
-            return 1
-        fi
-    elif command -v netstat >/dev/null 2>&1; then
-        if netstat -tuln | grep -q ":${port}\b"; then
-            return 1
-        fi
-    else
-        echo "⚠️ 未找到 ss 或 netstat，无法检查端口占用，将继续使用端口 $port"
-        return 0
+    if ss -tuln | grep -q ":${port}\b"; then
+        return 1
     fi
     return 0
 }
 
-# 读取用户输入的节点名称
-read -p "请输入节点名称（用于 ss:// 链接显示，建议使用唯一名称如 node1、node2）：" NODE_NAME
+# 自动生成唯一节点名称
+read -p "请输入节点名称（可留空自动生成）：" NODE_NAME
 if [[ -z "$NODE_NAME" ]]; then
-    echo "❌ 节点名称不能为空"
-    exit 1
+    BASE="node"
+    i=1
+    while [[ -f "/etc/shadowsocks-rust/node-${BASE}${i}.json" ]]; do
+        ((i++))
+    done
+    NODE_NAME="${BASE}${i}"
+    echo "ℹ️ 自动生成节点名称：$NODE_NAME"
 fi
+
 NODE_NAME_ENCODED=$(urlencode "$NODE_NAME")
 CONFIG_DIR="/etc/shadowsocks-rust"
 CONFIG_FILE="${CONFIG_DIR}/node-${NODE_NAME}.json"
 SERVICE_NAME="shadowsocks-rust-${NODE_NAME}"
 
-# 检查节点是否已存在
-if [ -f "$CONFIG_FILE" ]; then
-    read -p "⚠️ 节点 ${NODE_NAME} 的配置文件已存在，是否覆盖？[y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
+# 防止同名服务
+if systemctl list-units --type=service | grep -q "$SERVICE_NAME"; then
+    echo "⚠️ 服务 $SERVICE_NAME 已存在，请删除旧节点或更换名称"
+    exit 1
 fi
 
 # 创建配置目录
 mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
 
-# 检查并安装依赖
+# 安装依赖
 install_if_missing() {
     if ! command -v "$1" >/dev/null 2>&1; then
-        echo "🔧 正在安装依赖：$1"
-        if command -v apt >/dev/null 2>&1; then
-            apt update -y && apt install -y --no-install-recommends "$1"
-        elif command -v yum >/dev/null 2>&1; then
-            yum install -y epel-release && yum install -y "$1"
-        elif command -v apk >/dev/null 2>&1; then
-            apk add "$1"
-        else
-            echo "❌ 无法安装 $1，请手动安装后重试"
-            exit 1
-        fi
+        echo "🔧 安装依赖：$1"
+        apt update -y && apt install -y "$1"
     fi
 }
 install_if_missing curl
@@ -84,30 +69,26 @@ install_if_missing xz-utils
 install_if_missing openssl
 install_if_missing net-tools
 
-# 生成随机端口并检查是否被占用
+# 随机可用端口
 MAX_ATTEMPTS=10
 ATTEMPT=1
 while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     PORT=$((RANDOM % 10000 + 10000))
-    echo "🔍 检查端口 $PORT 是否可用..."
     if check_port $PORT; then
-        echo "✅ 端口 $PORT 可用"
         break
     else
-        echo "⚠️ 端口 $PORT 已被占用，尝试下一个端口..."
-        ATTEMPT=$((ATTEMPT + 1))
-        if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-            echo "❌ 无法找到可用端口，请手动指定端口或释放占用端口"
-            exit 1
-        fi
+        ((ATTEMPT++))
     fi
 done
+if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+    echo "❌ 无法找到可用端口"
+    exit 1
+fi
 
-# 生成其他配置
 PASSWORD=$(openssl rand -base64 12)
 METHOD="aes-256-gcm"
 
-# 判断 IPv6 支持
+# IPv6 检测
 if [ -f /proc/net/if_inet6 ]; then
     HAS_IPV6=true
     LISTEN_ADDR="::"
@@ -116,93 +97,42 @@ else
     LISTEN_ADDR="0.0.0.0"
 fi
 
-# 检测服务器架构
+# 架构匹配
 ARCH=$(uname -m)
 case "$ARCH" in
-    x86_64)
-        ASSET_FILTER="x86_64-unknown-linux-gnu.tar.xz$"
-        ;;
-    aarch64)
-        ASSET_FILTER="aarch64-unknown-linux-gnu.tar.xz$"
-        ;;
-    *)
-        echo "❌ 不支持的架构：$ARCH"
-        exit 1
-        ;;
+    x86_64) ASSET_FILTER="x86_64-unknown-linux-gnu.tar.xz$" ;;
+    aarch64) ASSET_FILTER="aarch64-unknown-linux-gnu.tar.xz$" ;;
+    *) echo "❌ 不支持的架构 $ARCH"; exit 1 ;;
 esac
 
-# 下载并安装 Shadowsocks-Rust（仅在首次运行时安装）
-if ! [ -x "/usr/local/bin/ssserver" ]; then
-    echo "🔍 获取 Shadowsocks-Rust 最新版本信息..."
-    RELEASE_JSON=$(curl -s -f --connect-timeout 10 --max-time 30 https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest 2>/dev/null)
-    if [[ $? -ne 0 || -z "$RELEASE_JSON" ]]; then
-        echo "❌ 无法访问 GitHub API，请检查网络连接或 GitHub API 状态"
-        exit 1
-    fi
-
-    # 调试：输出资产列表
-    echo "$RELEASE_JSON" | jq -r '.assets[].name' > assets.txt
-    echo "📄 可用资产列表："
-    cat assets.txt
-
-    # 提取 .tar.xz 文件的下载链接（精确匹配）
-    LATEST_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"$ASSET_FILTER\")) | .browser_download_url" | head -n 1 | tr -d '\n\r' | sed 's/[^a-zA-Z0-9:/.?-]//g')
-    if [[ -z "$LATEST_URL" ]]; then
-        echo "❌ 未找到适用于 $ARCH 的 Shadowsocks-Rust 资产 ($ASSET_FILTER)"
-        echo "请检查 GitHub 发布页面：https://github.com/shadowsocks/shadowsocks-rust/releases"
-        exit 1
-    fi
-    echo "📥 下载链接：$LATEST_URL"
-
-    # 调试：检查 URL 字符内容
-    echo "🔍 检查 URL 字符内容："
-    od -c <<< "$LATEST_URL"
-
-    # 下载校验和文件
-    SHA256_URL="${LATEST_URL}.sha256"
-    curl -L -f --connect-timeout 10 --max-time 30 "$SHA256_URL" -o ss-rust.tar.xz.sha256 || echo "⚠️ 无法下载校验和文件，继续但不验证文件完整性"
-
-    # 下载二进制文件
+# 安装 Shadowsocks-Rust
+if ! command -v ssserver >/dev/null 2>&1; then
+    echo "📥 安装 Shadowsocks-Rust..."
+    RELEASE_JSON=$(curl -s https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest)
+    LATEST_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"$ASSET_FILTER\")) | .browser_download_url" | head -n1)
     mkdir -p /opt/ss-rust && cd /opt/ss-rust
-    curl -L -f --connect-timeout 10 --max-time 30 "$LATEST_URL" -o ss-rust.tar.xz
-    if [[ $? -ne 0 ]]; then
-        echo "❌ 下载 Shadowsocks-Rust 失败，请检查网络或 URL"
-        exit 1
-    fi
-
-    # 验证校验和（如果存在）
-    if [ -f ss-rust.tar.xz.sha256 ]; then
-        echo "🔍 验证文件完整性..."
-        if ! echo "$(cat ss-rust.tar.xz.sha256) ss-rust.tar.xz" | sha256sum -c --status; then
-            echo "❌ 校验和验证失败，文件可能已损坏"
-            rm -f ss-rust.tar.xz ss-rust.tar.xz.sha256
-            exit 1
-        fi
-        echo "✅ 校验和验证通过"
-        rm -f ss-rust.tar.xz.sha256
-    fi
-
+    curl -L "$LATEST_URL" -o ss-rust.tar.xz
     tar -xJf ss-rust.tar.xz
     install sslocal ssserver ssmanager /usr/local/bin/
-    rm -f ss-rust.tar.xz
+    cd ~
 fi
 
-# 验证安装
-for bin in sslocal ssserver ssmanager; do
-    if ! [ -x "/usr/local/bin/$bin" ]; then
+# 验证可执行
+for bin in ssserver sslocal; do
+    if ! command -v $bin >/dev/null; then
         echo "❌ $bin 安装失败"
         exit 1
     fi
 done
 
-# 创建配置文件
+# 写入配置文件
 cat > "$CONFIG_FILE" <<EOF
 {
-    "server": "$LISTEN_ADDR",
-    "server_port": $PORT,
-    "password": "$PASSWORD",
-    "method": "$METHOD",
-    "mode": "tcp_and_udp"
+  "server": "$LISTEN_ADDR",
+  "server_port": $PORT,
+  "password": "$PASSWORD",
+  "method": "$METHOD",
+  "mode": "tcp_and_udp"
 }
 EOF
 chmod 600 "$CONFIG_FILE"
@@ -221,40 +151,35 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
 
-# 验证服务状态
 if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    echo "❌ Shadowsocks-Rust 服务 ($SERVICE_NAME) 启动失败，以下是详细信息："
+    echo "❌ 服务启动失败"
     systemctl status "$SERVICE_NAME"
     exit 1
 fi
 
-# 获取公网 IP（优先 IPv4，尝试多个服务）
+# 获取公网 IP
 IP=""
-for service in "https://api64.ipify.org" "https://api.ipify.org" "https://ifconfig.me"; do
-    IP=$(curl -s -4 --connect-timeout 5 --max-time 10 "$service")
-    if [[ -n "$IP" && "$IP" =~ ^[0-9.:]+$ ]]; then
-        break
-    fi
-    IP=$(curl -s -6 --connect-timeout 5 --max-time 10 "$service")
-    if [[ -n "$IP" && "$IP" =~ ^[0-9.:]+$ ]]; then
-        break
-    fi
+for S in "https://api64.ipify.org" "https://api.ipify.org" "https://ifconfig.me"; do
+    IP=$(curl -s --connect-timeout 5 "$S")
+    [[ "$IP" =~ ^[0-9a-fA-F:.]+$ ]] && break
 done
-if [[ -z "$IP" || ! "$IP" =~ ^[0-9.:]+$ ]]; then
-    echo "❌ 无法获取有效公网 IP，请检查网络连接"
+if [[ -z "$IP" ]]; then
+    echo "❌ 获取公网 IP 失败"
     exit 1
 fi
 
-# 构建标准 ss:// 链接
+# 构建链接
 ENCODED=$(echo -n "$METHOD:$PASSWORD@$IP:$PORT" | base64 | tr -d '\n')
 SS_LINK="ss://$ENCODED#$NODE_NAME_ENCODED"
 
-# 输出节点信息和链接
-echo -e "\n✅ Shadowsocks-Rust 节点 ($NODE_NAME) 已部署成功"
+# 写入记录
+echo "$NODE_NAME $PORT $PASSWORD $METHOD $IP $SS_LINK" >> /etc/shadowsocks-rust/nodes.list
+
+# 输出信息
+echo -e "\n✅ Shadowsocks-Rust 节点已部署成功"
 echo "-------------------------------------"
 echo "节点名称: $NODE_NAME"
 echo "地址: $IP"
