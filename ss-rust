@@ -1,3 +1,4 @@
+```bash
 #!/bin/bash
 set -e
 
@@ -7,7 +8,7 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 纯 bash URL 编码
+# 纯 bash 实现 URL 编码
 urlencode() {
     local length="${#1}"
     local i c
@@ -20,7 +21,25 @@ urlencode() {
     done
 }
 
-# 读取节点名称
+# 检查端口是否被占用（TCP 和 UDP）
+check_port() {
+    local port=$1
+    if command -v ss >/dev/null 2>&1; then
+        if ss -tuln | grep -q ":${port}\b"; then
+            return 1
+        fi
+    elif command -v netstat >/dev/null 2>&1; then
+        if netstat -tuln | grep -q ":${port}\b"; then
+            return 1
+        fi
+    else
+        echo "⚠️ 未找到 ss 或 netstat，无法检查端口占用，将继续使用端口 $port"
+        return 0
+    fi
+    return 0
+}
+
+# 读取用户输入的节点名称
 read -p "请输入节点名称（用于 ss:// 链接显示）: " NODE_NAME
 NODE_NAME_ENCODED=$(urlencode "$NODE_NAME")
 
@@ -44,9 +63,28 @@ install_if_missing curl
 install_if_missing jq
 install_if_missing xz-utils
 install_if_missing openssl
+install_if_missing net-tools  # 安装 netstat 用于端口检查
 
-# 生成随机配置
-PORT=$((RANDOM % 10000 + 10000))
+# 生成随机端口并检查是否被占用
+MAX_ATTEMPTS=10
+ATTEMPT=1
+while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+    PORT=$((RANDOM % 10000 + 10000))
+    echo "🔍 检查端口 $PORT 是否可用..."
+    if check_port $PORT; then
+        echo "✅ 端口 $PORT 可用"
+        break
+    else
+        echo "⚠️ 端口 $PORT 已被占用，尝试下一个端口..."
+        ATTEMPT=$((ATTEMPT + 1))
+        if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+            echo "❌ 无法找到可用端口，请手动指定端口或释放占用端口"
+            exit 1
+        fi
+    fi
+done
+
+# 生成其他配置
 PASSWORD=$(openssl rand -base64 12)
 METHOD="aes-256-gcm"
 
@@ -87,8 +125,8 @@ echo "$RELEASE_JSON" | jq -r '.assets[].name' > assets.txt
 echo "📄 可用资产列表："
 cat assets.txt
 
-# 提取 .tar.xz 文件的下载链接（精确匹配，排除 .sha256）
-LATEST_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"$ASSET_FILTER\")) | .browser_download_url" | head -n 1 | tr -d '\n\r')
+# 提取 .tar.xz 文件的下载链接（精确匹配）
+LATEST_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"$ASSET_FILTER\")) | .browser_download_url" | head -n 1 | tr -d '\n\r' | sed 's/[^a-zA-Z0-9:/.?-]//g')
 if [[ -z "$LATEST_URL" ]]; then
     echo "❌ 未找到适用于 $ARCH 的 Shadowsocks-Rust 资产 ($ASSET_FILTER)"
     echo "请检查 GitHub 发布页面：https://github.com/shadowsocks/shadowsocks-rust/releases"
@@ -204,3 +242,4 @@ echo "密码: $PASSWORD"
 echo "加密: $METHOD"
 echo "IPv6 支持: $HAS_IPV6"
 echo -e "\n📎 标准链接：\n$SS_LINK"
+```
