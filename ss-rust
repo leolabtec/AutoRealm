@@ -134,7 +134,7 @@ esac
 # 下载并安装 Shadowsocks-Rust（仅在首次运行时安装）
 if ! [ -x "/usr/local/bin/ssserver" ]; then
     echo "🔍 获取 Shadowsocks-Rust 最新版本信息..."
-    RELEASE_JSON=$(curl -s -f --connect-timeout 10 https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest 2>/dev/null)
+    RELEASE_JSON=$(curl -s -f --connect-timeout 10 --max-time 30 https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest 2>/dev/null)
     if [[ $? -ne 0 || -z "$RELEASE_JSON" ]]; then
         echo "❌ 无法访问 GitHub API，请检查网络连接或 GitHub API 状态"
         exit 1
@@ -160,11 +160,11 @@ if ! [ -x "/usr/local/bin/ssserver" ]; then
 
     # 下载校验和文件
     SHA256_URL="${LATEST_URL}.sha256"
-    curl -L -f --connect-timeout 10 "$SHA256_URL" -o ss-rust.tar.xz.sha256 || echo "⚠️ 无法下载校验和文件，继续但不验证文件完整性"
+    curl -L -f --connect-timeout 10 --max-time 30 "$SHA256_URL" -o ss-rust.tar.xz.sha256 || echo "⚠️ 无法下载校验和文件，继续但不验证文件完整性"
 
     # 下载二进制文件
     mkdir -p /opt/ss-rust && cd /opt/ss-rust
-    curl -L -f --connect-timeout 10 "$LATEST_URL" -o ss-rust.tar.xz
+    curl -L -f --connect-timeout 10 --max-time 30 "$LATEST_URL" -o ss-rust.tar.xz
     if [[ $? -ne 0 ]]; then
         echo "❌ 下载 Shadowsocks-Rust 失败，请检查网络或 URL"
         exit 1
@@ -227,17 +227,25 @@ systemctl enable --now "$SERVICE_NAME"
 
 # 验证服务状态
 if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    echo "❌ Shadowsocks-Rust 服务 ($SERVICE_NAME) 启动失败，请检查 systemctl status $SERVICE_NAME"
+    echo "❌ Shadowsocks-Rust 服务 ($SERVICE_NAME) 启动失败，以下是详细信息："
+    systemctl status "$SERVICE_NAME"
     exit 1
 fi
 
-# 获取公网 IP（优先 IPv4）
-IP=$(curl -s -4 --connect-timeout 5 https://api64.ipify.org)
-if [[ -z "$IP" ]]; then
-    IP=$(curl -s -6 --connect-timeout 5 https://api64.ipify.org)
-fi
-if [[ ! "$IP" =~ ^[0-9.:]+$ ]]; then
-    echo "❌ 无法获取有效公网 IP，请检查网络"
+# 获取公网 IP（优先 IPv4，尝试多个服务）
+IP=""
+for service in "https://api64.ipify.org" "https://api.ipify.org" "https://ifconfig.me"; do
+    IP=$(curl -s -4 --connect-timeout 5 --max-time 10 "$service")
+    if [[ -n "$IP" && "$IP" =~ ^[0-9.:]+$ ]]; then
+        break
+    fi
+    IP=$(curl -s -6 --connect-timeout 5 --max-time 10 "$service")
+    if [[ -n "$IP" && "$IP" =~ ^[0-9.:]+$ ]]; then
+        break
+    fi
+done
+if [[ -z "$IP" || ! "$IP" =~ ^[0-9.:]+$ ]]; then
+    echo "❌ 无法获取有效公网 IP，请检查网络连接"
     exit 1
 fi
 
