@@ -7,7 +7,7 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 纯 bash 实现 URL 编码
+# 纯 bash URL 编码
 urlencode() {
     local length="${#1}"
     local i c
@@ -20,7 +20,7 @@ urlencode() {
     done
 }
 
-# 读取用户输入的节点名称
+# 读取节点名称
 read -p "请输入节点名称（用于 ss:// 链接显示）: " NODE_NAME
 NODE_NAME_ENCODED=$(urlencode "$NODE_NAME")
 
@@ -59,16 +59,71 @@ else
     LISTEN_ADDR="0.0.0.0"
 fi
 
+# 检测服务器架构
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64)
+        ASSET_FILTER="x86_64-unknown-linux-gnu.tar.xz$"
+        ;;
+    aarch64)
+        ASSET_FILTER="aarch64-unknown-linux-gnu.tar.xz$"
+        ;;
+    *)
+        echo "❌ 不支持的架构：$ARCH"
+        exit 1
+        ;;
+esac
+
 # 下载并安装 Shadowsocks-Rust
-LATEST_URL=$(curl -s https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest | \
-    jq -r '.assets[] | select(.name | test("x86_64-unknown-linux-gnu.tar.xz")) | .browser_download_url')
-if [[ -z "$LATEST_URL" ]]; then
-    echo "❌ 无法获取 Shadowsocks-Rust 下载链接，请检查网络或 GitHub API"
+echo "🔍 获取 Shadowsocks-Rust 最新版本信息..."
+RELEASE_JSON=$(curl -s -f https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest 2>/dev/null)
+if [[ $? -ne 0 || -z "$RELEASE_JSON" ]]; then
+    echo "❌ 无法访问 GitHub API，请检查网络连接或 GitHub API 状态"
     exit 1
 fi
 
+# 调试：输出资产列表
+echo "$RELEASE_JSON" | jq -r '.assets[].name' > assets.txt
+echo "📄 可用资产列表："
+cat assets.txt
+
+# 提取 .tar.xz 文件的下载链接（精确匹配，排除 .sha256）
+LATEST_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"$ASSET_FILTER\")) | .browser_download_url" | head -n 1 | tr -d '\n\r')
+if [[ -z "$LATEST_URL" ]]; then
+    echo "❌ 未找到适用于 $ARCH 的 Shadowsocks-Rust 资产 ($ASSET_FILTER)"
+    echo "请检查 GitHub 发布页面：https://github.com/shadowsocks/shadowsocks-rust/releases"
+    exit 1
+fi
+echo "📥 下载链接：$LATEST_URL"
+
+# 调试：检查 URL 字符内容
+echo "🔍 检查 URL 字符内容："
+od -c <<< "$LATEST_URL"
+
+# 下载校验和文件
+SHA256_URL="${LATEST_URL}.sha256"
+curl -L -f "$SHA256_URL" -o ss-rust.tar.xz.sha256 || echo "⚠️ 无法下载校验和文件，继续但不验证文件完整性"
+
+# 下载二进制文件
 mkdir -p /opt/ss-rust && cd /opt/ss-rust
-curl -L "$LATEST_URL" -o ss-rust.tar.xz
+curl -L -f "$LATEST_URL" -o ss-rust.tar.xz
+if [[ $? -ne 0 ]]; then
+    echo "❌ 下载 Shadowsocks-Rust 失败，请检查网络或 URL"
+    exit 1
+fi
+
+# 验证校验和（如果存在）
+if [ -f ss-rust.tar.xz.sha256 ]; then
+    echo "🔍 验证文件完整性..."
+    if ! echo "$(cat ss-rust.tar.xz.sha256) ss-rust.tar.xz" | sha256sum -c --status; then
+        echo "❌ 校验和验证失败，文件可能已损坏"
+        rm -f ss-rust.tar.xz ss-rust.tar.xz.sha256
+        exit 1
+    fi
+    echo "✅ 校验和验证通过"
+    rm -f ss-rust.tar.xz.sha256
+fi
+
 tar -xJf ss-rust.tar.xz
 install sslocal ssserver ssmanager /usr/local/bin/
 rm -f ss-rust.tar.xz
