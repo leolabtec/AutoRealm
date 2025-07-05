@@ -40,8 +40,28 @@ check_port() {
 }
 
 # 读取用户输入的节点名称
-read -p "请输入节点名称（用于 ss:// 链接显示）: " NODE_NAME
+read -p "请输入节点名称（用于 ss:// 链接显示，建议使用唯一名称如 node1、node2）：" NODE_NAME
+if [[ -z "$NODE_NAME" ]]; then
+    echo "❌ 节点名称不能为空"
+    exit 1
+fi
 NODE_NAME_ENCODED=$(urlencode "$NODE_NAME")
+CONFIG_DIR="/etc/shadowsocks-rust"
+CONFIG_FILE="${CONFIG_DIR}/node-${NODE_NAME}.json"
+SERVICE_NAME="shadowsocks-rust-${NODE_NAME}"
+
+# 检查节点是否已存在
+if [ -f "$CONFIG_FILE" ]; then
+    read -p "⚠️ 节点 ${NODE_NAME} 的配置文件已存在，是否覆盖？[y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
+# 创建配置目录
+mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR"
 
 # 检查并安装依赖
 install_if_missing() {
@@ -63,7 +83,7 @@ install_if_missing curl
 install_if_missing jq
 install_if_missing xz-utils
 install_if_missing openssl
-install_if_missing net-tools  # 安装 netstat 用于端口检查
+install_if_missing net-tools
 
 # 生成随机端口并检查是否被占用
 MAX_ATTEMPTS=10
@@ -112,59 +132,61 @@ case "$ARCH" in
         ;;
 esac
 
-# 下载并安装 Shadowsocks-Rust
-echo "🔍 获取 Shadowsocks-Rust 最新版本信息..."
-RELEASE_JSON=$(curl -s -f https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest 2>/dev/null)
-if [[ $? -ne 0 || -z "$RELEASE_JSON" ]]; then
-    echo "❌ 无法访问 GitHub API，请检查网络连接或 GitHub API 状态"
-    exit 1
-fi
-
-# 调试：输出资产列表
-echo "$RELEASE_JSON" | jq -r '.assets[].name' > assets.txt
-echo "📄 可用资产列表："
-cat assets.txt
-
-# 提取 .tar.xz 文件的下载链接（精确匹配）
-LATEST_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"$ASSET_FILTER\")) | .browser_download_url" | head -n 1 | tr -d '\n\r' | sed 's/[^a-zA-Z0-9:/.?-]//g')
-if [[ -z "$LATEST_URL" ]]; then
-    echo "❌ 未找到适用于 $ARCH 的 Shadowsocks-Rust 资产 ($ASSET_FILTER)"
-    echo "请检查 GitHub 发布页面：https://github.com/shadowsocks/shadowsocks-rust/releases"
-    exit 1
-fi
-echo "📥 下载链接：$LATEST_URL"
-
-# 调试：检查 URL 字符内容
-echo "🔍 检查 URL 字符内容："
-od -c <<< "$LATEST_URL"
-
-# 下载校验和文件
-SHA256_URL="${LATEST_URL}.sha256"
-curl -L -f "$SHA256_URL" -o ss-rust.tar.xz.sha256 || echo "⚠️ 无法下载校验和文件，继续但不验证文件完整性"
-
-# 下载二进制文件
-mkdir -p /opt/ss-rust && cd /opt/ss-rust
-curl -L -f "$LATEST_URL" -o ss-rust.tar.xz
-if [[ $? -ne 0 ]]; then
-    echo "❌ 下载 Shadowsocks-Rust 失败，请检查网络或 URL"
-    exit 1
-fi
-
-# 验证校验和（如果存在）
-if [ -f ss-rust.tar.xz.sha256 ]; then
-    echo "🔍 验证文件完整性..."
-    if ! echo "$(cat ss-rust.tar.xz.sha256) ss-rust.tar.xz" | sha256sum -c --status; then
-        echo "❌ 校验和验证失败，文件可能已损坏"
-        rm -f ss-rust.tar.xz ss-rust.tar.xz.sha256
+# 下载并安装 Shadowsocks-Rust（仅在首次运行时安装）
+if ! [ -x "/usr/local/bin/ssserver" ]; then
+    echo "🔍 获取 Shadowsocks-Rust 最新版本信息..."
+    RELEASE_JSON=$(curl -s -f https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest 2>/dev/null)
+    if [[ $? -ne 0 || -z "$RELEASE_JSON" ]]; then
+        echo "❌ 无法访问 GitHub API，请检查网络连接或 GitHub API 状态"
         exit 1
     fi
-    echo "✅ 校验和验证通过"
-    rm -f ss-rust.tar.xz.sha256
-fi
 
-tar -xJf ss-rust.tar.xz
-install sslocal ssserver ssmanager /usr/local/bin/
-rm -f ss-rust.tar.xz
+    # 调试：输出资产列表
+    echo "$RELEASE_JSON" | jq -r '.assets[].name' > assets.txt
+    echo "📄 可用资产列表："
+    cat assets.txt
+
+    # 提取 .tar.xz 文件的下载链接（精确匹配）
+    LATEST_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"$ASSET_FILTER\")) | .browser_download_url" | head -n 1 | tr -d '\n\r' | sed 's/[^a-zA-Z0-9:/.?-]//g')
+    if [[ -z "$LATEST_URL" ]]; then
+        echo "❌ 未找到适用于 $ARCH 的 Shadowsocks-Rust 资产 ($ASSET_FILTER)"
+        echo "请检查 GitHub 发布页面：https://github.com/shadowsocks/shadowsocks-rust/releases"
+        exit 1
+    fi
+    echo "📥 下载链接：$LATEST_URL"
+
+    # 调试：检查 URL 字符内容
+    echo "🔍 检查 URL 字符内容："
+    od -c <<< "$LATEST_URL"
+
+    # 下载校验和文件
+    SHA256_URL="${LATEST_URL}.sha256"
+    curl -L -f "$SHA256_URL" -o ss-rust.tar.xz.sha256 || echo "⚠️ 无法下载校验和文件，继续但不验证文件完整性"
+
+    # 下载二进制文件
+    mkdir -p /opt/ss-rust && cd /opt/ss-rust
+    curl -L -f "$LATEST_URL" -o ss-rust.tar.xz
+    if [[ $? -ne 0 ]]; then
+        echo "❌ 下载 Shadowsocks-Rust 失败，请检查网络或 URL"
+        exit 1
+    fi
+
+    # 验证校验和（如果存在）
+    if [ -f ss-rust.tar.xz.sha256 ]; then
+        echo "🔍 验证文件完整性..."
+        if ! echo "$(cat ss-rust.tar.xz.sha256) ss-rust.tar.xz" | sha256sum -c --status; then
+            echo "❌ 校验和验证失败，文件可能已损坏"
+            rm -f ss-rust.tar.xz ss-rust.tar.xz.sha256
+            exit 1
+        fi
+        echo "✅ 校验和验证通过"
+        rm -f ss-rust.tar.xz.sha256
+    fi
+
+    tar -xJf ss-rust.tar.xz
+    install sslocal ssserver ssmanager /usr/local/bin/
+    rm -f ss-rust.tar.xz
+fi
 
 # 验证安装
 for bin in sslocal ssserver ssmanager; do
@@ -174,17 +196,8 @@ for bin in sslocal ssserver ssmanager; do
     fi
 done
 
-# 检查配置文件是否已存在
-if [ -f /etc/shadowsocks-rust.json ]; then
-    read -p "⚠️ 配置文件已存在，是否覆盖？[y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-fi
-
 # 创建配置文件
-cat > /etc/shadowsocks-rust.json <<EOF
+cat > "$CONFIG_FILE" <<EOF
 {
     "server": "$LISTEN_ADDR",
     "server_port": $PORT,
@@ -193,16 +206,16 @@ cat > /etc/shadowsocks-rust.json <<EOF
     "mode": "tcp_and_udp"
 }
 EOF
-chmod 600 /etc/shadowsocks-rust.json
+chmod 600 "$CONFIG_FILE"
 
 # 创建 systemd 服务
-cat > /etc/systemd/system/shadowsocks-rust.service <<EOF
+cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
-Description=Shadowsocks Rust Server
+Description=Shadowsocks Rust Server ($NODE_NAME)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/ssserver -c /etc/shadowsocks-rust.json
+ExecStart=/usr/local/bin/ssserver -c $CONFIG_FILE
 Restart=always
 
 [Install]
@@ -211,11 +224,11 @@ EOF
 
 systemctl daemon-reexec
 systemctl daemon-reload
-systemctl enable --now shadowsocks-rust
+systemctl enable --now "$SERVICE_NAME"
 
 # 验证服务状态
-if ! systemctl is-active --quiet shadowsocks-rust; then
-    echo "❌ Shadowsocks-Rust 服务启动失败，请检查 systemctl status shadowsocks-rust"
+if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    echo "❌ Shadowsocks-Rust 服务 ($SERVICE_NAME) 启动失败，请检查 systemctl status $SERVICE_NAME"
     exit 1
 fi
 
@@ -234,12 +247,15 @@ ENCODED=$(echo -n "$METHOD:$PASSWORD@$IP:$PORT" | base64 | tr -d '\n')
 SS_LINK="ss://$ENCODED#$NODE_NAME_ENCODED"
 
 # 输出节点信息和链接
-echo -e "\n✅ Shadowsocks-Rust 已部署成功"
+echo -e "\n✅ Shadowsocks-Rust 节点 ($NODE_NAME) 已部署成功"
 echo "-------------------------------------"
+echo "节点名称: $NODE_NAME"
 echo "地址: $IP"
 echo "端口: $PORT"
 echo "密码: $PASSWORD"
 echo "加密: $METHOD"
 echo "IPv6 支持: $HAS_IPV6"
+echo "配置文件: $CONFIG_FILE"
+echo "服务名称: $SERVICE_NAME"
 echo -e "\n📎 标准链接：\n$SS_LINK"
 ```
