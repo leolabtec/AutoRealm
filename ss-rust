@@ -1,8 +1,11 @@
 #!/bin/bash
 set -e
 
+# 配置变量
 CONFIG_DIR="/etc/shadowsocks-rust"
 NODES_LIST="$CONFIG_DIR/nodes.list"
+INSTALL_DIR="/usr/local/bin"
+GITHUB_API="https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
 
 # 检查 root 权限
 if [ "$EUID" -ne 0 ]; then
@@ -10,8 +13,9 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 优化后的依赖安装函数
+# 安装依赖函数
 install_dependencies() {
+    echo "🔧 检查依赖..."
     local MISSING=()
     declare -A pkg_commands=(
         ["curl"]="curl"
@@ -22,72 +26,73 @@ install_dependencies() {
     )
 
     for pkg in "${!pkg_commands[@]}"; do
-        if ! command -v "${pkg_commands[$pkg]}" &>/dev/null; then
-            MISSING+=("$pkg")
-        fi
+        command -v "${pkg_commands[$pkg]}" &>/dev/null || MISSING+=("$pkg")
     done
 
-    if (( ${#MISSING[@]} > 0 )); then
-        echo "🔧 检测到以下依赖缺失：${MISSING[*]}"
-        apt update -y
-        apt install -y --no-install-recommends "${MISSING[@]}"
+    if [ ${#MISSING[@]} -gt 0 ]; then
+        echo "📥 安装缺失依赖：${MISSING[*]}"
+        apt-get update -y || { echo "错误：更新 apt 失败"; exit 1; }
+        apt-get install -y --no-install-recommends "${MISSING[@]}" || { echo "错误：安装依赖失败"; exit 1; }
     else
-        echo "ℹ️ 所有依赖已安装，无需更新"
+        echo "ℹ️ 所有依赖已安装"
     fi
 }
 
 # 创建 Shadowsocks 节点
 create_node() {
-    echo
-    read -p "请输入节点名称（可留空自动生成）：" NODE_NAME
-    if [[ -z "$NODE_NAME" ]]; then
-        NODE_NAME="node$(date +%s | tail -c 3)"
-        echo "ℹ️ 自动生成节点名称：$NODE_NAME"
-    fi
-    CONFIG_FILE="${CONFIG_DIR}/node-${NODE_NAME}.json"
-    SERVICE_NAME="shadowsocks-rust-${NODE_NAME}"
+    echo -e "\n📋 创建新 Shadowsocks 节点"
+    read -p "请输入节点名称（留空自动生成）：" NODE_NAME
+    [ -z "$NODE_NAME" ] && NODE_NAME="node$(date +%s | tail -c 3)" && echo "ℹ️ 自动生成节点名称：$NODE_NAME"
 
-    if [[ -f "$CONFIG_FILE" ]]; then
+    CONFIG_FILE="$CONFIG_DIR/node-$NODE_NAME.json"
+    SERVICE_NAME="shadowsocks-rust-$NODE_NAME"
+
+    if [ -f "$CONFIG_FILE" ]; then
         echo "⚠️ 节点 $NODE_NAME 已存在"
-        return
+        return 1
     fi
 
-    mkdir -p "$CONFIG_DIR"
-    chmod 700 "$CONFIG_DIR"
-
+    mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR"
     install_dependencies
 
-    # 随机端口
+    # 选择随机端口
     for i in {1..10}; do
         PORT=$((RANDOM % 10000 + 10000))
         ss -tuln | grep -q ":$PORT\b" || break
+        [ $i -eq 10 ] && { echo "错误：无法找到可用端口"; exit 1; }
     done
 
+    # 生成配置
     PASSWORD=$(openssl rand -base64 12)
     METHOD="aes-256-gcm"
     LISTEN_ADDR="::"
 
-    # 下载 Shadowsocks-Rust（二进制）只一次
+    # 下载 Shadowsocks-Rust（仅在未安装时）
     if ! command -v ssserver &>/dev/null; then
         echo "📥 安装 Shadowsocks-Rust..."
         ARCH=$(uname -m)
         case "$ARCH" in
             x86_64) FILE="x86_64-unknown-linux-gnu.tar.xz" ;;
             aarch64) FILE="aarch64-unknown-linux-gnu.tar.xz" ;;
-            *) echo "❌ 不支持架构 $ARCH" && exit 1 ;;
+            *) echo "❌ 不支持的架构 $ARCH"; exit 1 ;;
         esac
 
         TMPDIR=$(mktemp -d)
+        trap 'rm -rf "$TMPDIR"' EXIT
         cd "$TMPDIR"
-        RELEASE=$(curl -s https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest)
+
+        # 获取最新版本
+        RELEASE=$(curl -sSL "$GITHUB_API" || { echo "错误：无法访问 GitHub API"; exit 1; })
         URL=$(echo "$RELEASE" | jq -r ".assets[] | select(.name | test(\"$FILE\")) | .browser_download_url")
-        curl -L "$URL" -o ss.tar.xz
-        tar -xf ss.tar.xz
-        install ssserver sslocal ssmanager /usr/local/bin/
+        [ -z "$URL" ] && { echo "错误：无法获取下载 URL"; exit 1; }
+
+        curl -L "$URL" -o ss.tar.xz || { echo "错误：下载 $URL 失败"; exit 1; }
+        tar -xf ss.tar.xz || { echo "错误：解压失败"; exit 1; }
+        install -m 755 ssserver sslocal ssmanager "$INSTALL_DIR/" || { echo "错误：安装二进制文件失败"; exit 1; }
         cd ~ && rm -rf "$TMPDIR"
     fi
 
-    # 写配置
+    # 写入配置文件
     cat > "$CONFIG_FILE" <<EOF
 {
     "server": "$LISTEN_ADDR",
@@ -99,76 +104,77 @@ create_node() {
 EOF
     chmod 600 "$CONFIG_FILE"
 
-    # 写服务
-    cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
+    # 创建 systemd 服务
+    cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
 [Unit]
-Description=Shadowsocks Rust Server ($NODE_NAME)
+Description=Shadowsocks-Rust Server ($NODE_NAME)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/ssserver -c $CONFIG_FILE
+Type=simple
+ExecStart=$INSTALL_DIR/ssserver -c $CONFIG_FILE
 Restart=always
+User=nobody
+Group=nogroup
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now "$SERVICE_NAME"
+    systemctl enable --now "$SERVICE_NAME" || { echo "错误：启动服务 $SERVICE_NAME 失败"; exit 1; }
 
     # 获取公网 IP
-    IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me)
+    IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "unknown")
+    [ "$IP" = "unknown" ] && echo "⚠️ 无法获取公网 IP，请手动检查"
 
-    # 显示连接信息
-    ENCODED=$(echo -n "$METHOD:$PASSWORD@$IP:$PORT" | base64)
+    # 生成连接信息
+    ENCODED=$(echo -n "$METHOD:$PASSWORD@$IP:$PORT" | base64 -w 0)
     echo "$NODE_NAME $PORT $PASSWORD $METHOD" >> "$NODES_LIST"
 
-    echo -e "\n✅ Shadowsocks-Rust 节点已部署成功"
+    echo -e "\n✅ 节点 $NODE_NAME 部署成功"
     echo "📎 链接: ss://${ENCODED}#${NODE_NAME}"
 }
 
 # 删除 Shadowsocks 节点
 delete_node() {
-    while true; do
-        echo
-        declare -a NODES
-        if [[ -f "$NODES_LIST" ]]; then
-            mapfile -t NODES < <(cut -d ' ' -f1 "$NODES_LIST")
-        else
-            mapfile -t NODES < <(find "$CONFIG_DIR" -name 'node-*.json' -exec basename {} \; | sed 's/^node-//;s/\.json$//')
-        fi
+    echo -e "\n🧹 删除 Shadowsocks 节点"
+    local NODES=()
+    if [ -f "$NODES_LIST" ]; then
+        mapfile -t NODES < <(cut -d ' ' -f1 "$NODES_LIST")
+    else
+        mapfile -t NODES < <(find "$CONFIG_DIR" -name 'node-*.json' -exec basename {} \; | sed 's/^node-//;s/\.json$//')
+    fi
 
-        if [[ ${#NODES[@]} -eq 0 ]]; then
-            echo "✅ 当前已无可删除的 Shadowsocks 节点，返回主菜单。"
-            return
-        fi
+    if [ ${#NODES[@]} -eq 0 ]; then
+        echo "✅ 当前无可删除的节点"
+        return
+    fi
 
-        echo "📋 当前可删除的节点："
-        for i in "${!NODES[@]}"; do
-            printf "  %2d) %s\n" $((i+1)) "${NODES[$i]}"
-        done
-        echo "   0) 返回主菜单"
-        read -p "请选择要删除的节点编号：" ID
-
-        if [[ "$ID" == "0" ]]; then
-            return
-        elif [[ "$ID" =~ ^[0-9]+$ ]] && (( ID >= 1 && ID <= ${#NODES[@]} )); then
-            NODE="${NODES[$((ID-1))]}"
-            echo "🧹 正在删除节点 $NODE..."
-            systemctl stop "shadowsocks-rust-$NODE" || true
-            systemctl disable "shadowsocks-rust-$NODE" || true
-            rm -f "/etc/systemd/system/shadowsocks-rust-${NODE}.service"
-            rm -f "$CONFIG_DIR/node-${NODE}.json"
-            [[ -f "$NODES_LIST" ]] && sed -i "/^$NODE /d" "$NODES_LIST"
-            systemctl daemon-reload
-            echo "✅ 节点 $NODE 已删除"
-        else
-            echo "❌ 无效编号"
-        fi
+    echo "📋 当前节点："
+    for i in "${!NODES[@]}"; do
+        printf "  %2d) %s\n" $((i+1)) "${NODES[$i]}"
     done
+    echo "   0) 返回主菜单"
+    read -p "请选择要删除的节点编号：" ID
+
+    if [ "$ID" = "0" ]; then
+        return
+    elif [[ "$ID" =~ ^[0-9]+$ ]] && (( ID >= 1 && ID <= ${#NODES[@]} )); then
+        NODE="${NODES[$((ID-1))]}"
+        echo "🧹 删除节点 $NODE..."
+        systemctl stop "shadowsocks-rust-$NODE" 2>/dev/null || true
+        systemctl disable "shadowsocks-rust-$NODE" 2>/dev/null || true
+        rm -f "/etc/systemd/system/shadowsocks-rust-$NODE.service" "$CONFIG_DIR/node-$NODE.json"
+        [ -f "$NODES_LIST" ] && sed -i "/^$NODE /d" "$NODES_LIST"
+        systemctl daemon-reload
+        echo "✅ 节点 $NODE 已删除"
+    else
+        echo "❌ 无效编号"
+    fi
 }
 
-# 主菜单循环
+# 主菜单
 while true; do
     echo -e "\n🧭 Shadowsocks-Rust 管理菜单"
     echo "1) 创建 Shadowsocks 节点"
