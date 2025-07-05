@@ -1,4 +1,3 @@
-```bash
 #!/bin/bash
 set -e
 
@@ -258,4 +257,3 @@ echo "IPv6 支持: $HAS_IPV6"
 echo "配置文件: $CONFIG_FILE"
 echo "服务名称: $SERVICE_NAME"
 echo -e "\n📎 标准链接：\n$SS_LINK"
-```
