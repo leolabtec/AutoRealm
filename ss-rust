@@ -1,0 +1,151 @@
+#!/bin/bash
+set -e
+
+# 检查 root 权限
+if [ "$EUID" -ne 0 ]; then
+    echo "❌ 请以 root 权限运行此脚本"
+    exit 1
+fi
+
+# 纯 bash 实现 URL 编码
+urlencode() {
+    local length="${#1}"
+    local i c
+    for (( i = 0; i < length; i++ )); do
+        c="${1:i:1}"
+        case "$c" in
+            [a-zA-Z0-9.~_-]) printf "$c" ;;
+            *) printf '%%%02X' "'$c" ;;
+        esac
+    done
+}
+
+# 读取用户输入的节点名称
+read -p "请输入节点名称（用于 ss:// 链接显示）: " NODE_NAME
+NODE_NAME_ENCODED=$(urlencode "$NODE_NAME")
+
+# 检查并安装依赖
+install_if_missing() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "🔧 正在安装依赖：$1"
+        if command -v apt >/dev/null 2>&1; then
+            apt update && apt install -y --no-install-recommends "$1"
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y epel-release && yum install -y "$1"
+        elif command -v apk >/dev/null 2>&1; then
+            apk add "$1"
+        else
+            echo "❌ 无法安装 $1，请手动安装后重试"
+            exit 1
+        fi
+    fi
+}
+install_if_missing curl
+install_if_missing jq
+install_if_missing xz-utils
+install_if_missing openssl
+
+# 生成随机配置
+PORT=$((RANDOM % 10000 + 10000))
+PASSWORD=$(openssl rand -base64 12)
+METHOD="aes-256-gcm"
+
+# 判断 IPv6 支持
+if [ -f /proc/net/if_inet6 ]; then
+    HAS_IPV6=true
+    LISTEN_ADDR="::"
+else
+    HAS_IPV6=false
+    LISTEN_ADDR="0.0.0.0"
+fi
+
+# 下载并安装 Shadowsocks-Rust
+LATEST_URL=$(curl -s https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest | \
+    jq -r '.assets[] | select(.name | test("x86_64-unknown-linux-gnu.tar.xz")) | .browser_download_url')
+if [[ -z "$LATEST_URL" ]]; then
+    echo "❌ 无法获取 Shadowsocks-Rust 下载链接，请检查网络或 GitHub API"
+    exit 1
+fi
+
+mkdir -p /opt/ss-rust && cd /opt/ss-rust
+curl -L "$LATEST_URL" -o ss-rust.tar.xz
+tar -xJf ss-rust.tar.xz
+install sslocal ssserver ssmanager /usr/local/bin/
+rm -f ss-rust.tar.xz
+
+# 验证安装
+for bin in sslocal ssserver ssmanager; do
+    if ! [ -x "/usr/local/bin/$bin" ]; then
+        echo "❌ $bin 安装失败"
+        exit 1
+    fi
+done
+
+# 检查配置文件是否已存在
+if [ -f /etc/shadowsocks-rust.json ]; then
+    read -p "⚠️ 配置文件已存在，是否覆盖？[y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
+# 创建配置文件
+cat > /etc/shadowsocks-rust.json <<EOF
+{
+    "server": "$LISTEN_ADDR",
+    "server_port": $PORT,
+    "password": "$PASSWORD",
+    "method": "$METHOD",
+    "mode": "tcp_and_udp"
+}
+EOF
+chmod 600 /etc/shadowsocks-rust.json
+
+# 创建 systemd 服务
+cat > /etc/systemd/system/shadowsocks-rust.service <<EOF
+[Unit]
+Description=Shadowsocks Rust Server
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/ssserver -c /etc/shadowsocks-rust.json
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reexec
+systemctl daemon-reload
+systemctl enable --now shadowsocks-rust
+
+# 验证服务状态
+if ! systemctl is-active --quiet shadowsocks-rust; then
+    echo "❌ Shadowsocks-Rust 服务启动失败，请检查 systemctl status shadowsocks-rust"
+    exit 1
+fi
+
+# 获取公网 IP（优先 IPv4）
+IP=$(curl -s -4 https://api64.ipify.org)
+if [[ -z "$IP" ]]; then
+    IP=$(curl -s -6 https://api64.ipify.org)
+fi
+if [[ ! "$IP" =~ ^[0-9.:]+$ ]]; then
+    echo "❌ 无法获取有效公网 IP，请检查网络"
+    exit 1
+fi
+
+# 构建标准 ss:// 链接
+ENCODED=$(echo -n "$METHOD:$PASSWORD@$IP:$PORT" | base64 | tr -d '\n')
+SS_LINK="ss://$ENCODED#$NODE_NAME_ENCODED"
+
+# 输出节点信息和链接
+echo -e "\n✅ Shadowsocks-Rust 已部署成功"
+echo "-------------------------------------"
+echo "地址: $IP"
+echo "端口: $PORT"
+echo "密码: $PASSWORD"
+echo "加密: $METHOD"
+echo "IPv6 支持: $HAS_IPV6"
+echo -e "\n📎 标准链接：\n$SS_LINK"
