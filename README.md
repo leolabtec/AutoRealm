@@ -3,3 +3,7 @@
 ```sh
 bash <(wget -qO- https://raw.githubusercontent.com/leolabtec/AutoRealm/refs/heads/main/bash.sh)
 ```
+ss-rust
+```sh
+bash <(curl -fsSL https://raw.githubusercontent.com/leolabtec/AutoRealm/refs/heads/main/ss-rust)
+```
