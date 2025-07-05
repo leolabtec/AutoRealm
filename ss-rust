@@ -67,7 +67,7 @@ install_if_missing() {
     if ! command -v "$1" >/dev/null 2>&1; then
         echo "🔧 正在安装依赖：$1"
         if command -v apt >/dev/null 2>&1; then
-            apt update && apt install -y --no-install-recommends "$1"
+            apt update -y && apt install -y --no-install-recommends "$1"
         elif command -v yum >/dev/null 2>&1; then
             yum install -y epel-release && yum install -y "$1"
         elif command -v apk >/dev/null 2>&1; then
@@ -134,7 +134,7 @@ esac
 # 下载并安装 Shadowsocks-Rust（仅在首次运行时安装）
 if ! [ -x "/usr/local/bin/ssserver" ]; then
     echo "🔍 获取 Shadowsocks-Rust 最新版本信息..."
-    RELEASE_JSON=$(curl -s -f https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest 2>/dev/null)
+    RELEASE_JSON=$(curl -s -f --connect-timeout 10 https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest 2>/dev/null)
     if [[ $? -ne 0 || -z "$RELEASE_JSON" ]]; then
         echo "❌ 无法访问 GitHub API，请检查网络连接或 GitHub API 状态"
         exit 1
@@ -160,11 +160,11 @@ if ! [ -x "/usr/local/bin/ssserver" ]; then
 
     # 下载校验和文件
     SHA256_URL="${LATEST_URL}.sha256"
-    curl -L -f "$SHA256_URL" -o ss-rust.tar.xz.sha256 || echo "⚠️ 无法下载校验和文件，继续但不验证文件完整性"
+    curl -L -f --connect-timeout 10 "$SHA256_URL" -o ss-rust.tar.xz.sha256 || echo "⚠️ 无法下载校验和文件，继续但不验证文件完整性"
 
     # 下载二进制文件
     mkdir -p /opt/ss-rust && cd /opt/ss-rust
-    curl -L -f "$LATEST_URL" -o ss-rust.tar.xz
+    curl -L -f --connect-timeout 10 "$LATEST_URL" -o ss-rust.tar.xz
     if [[ $? -ne 0 ]]; then
         echo "❌ 下载 Shadowsocks-Rust 失败，请检查网络或 URL"
         exit 1
@@ -232,9 +232,9 @@ if ! systemctl is-active --quiet "$SERVICE_NAME"; then
 fi
 
 # 获取公网 IP（优先 IPv4）
-IP=$(curl -s -4 https://api64.ipify.org)
+IP=$(curl -s -4 --connect-timeout 5 https://api64.ipify.org)
 if [[ -z "$IP" ]]; then
-    IP=$(curl -s -6 https://api64.ipify.org)
+    IP=$(curl -s -6 --connect-timeout 5 https://api64.ipify.org)
 fi
 if [[ ! "$IP" =~ ^[0-9.:]+$ ]]; then
     echo "❌ 无法获取有效公网 IP，请检查网络"
