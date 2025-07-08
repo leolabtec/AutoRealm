@@ -5,7 +5,7 @@ DEST_DIR="/etc/bash"
 INSTALL_SH="$DEST_DIR/install.sh"
 MAIN_SH="$DEST_DIR/main.sh"
 INSTALL_URL="https://raw.githubusercontent.com/leolabtec/AutoRealm/refs/heads/main/install.sh"
-MAIN_URL="https://raw.githubusercontent.com/leolabtec/AutoRealm/refs/heads/main/main.sh?token=GHSAT0AAAAAADFMHY5K23JTNQH2FTHJROOM2DIV4MQ"
+MAIN_URL="https://raw.githubusercontent.com/leolabtec/AutoRealm/refs/heads/main/main.sh"
 
 # 检查是否以 root 权限运行
 if [ "$(id -u)" -ne 0 ]; then
