@@ -163,16 +163,63 @@ delete_node() {
     echo "✅ 节点 $NODE 已删除"
 }
 
+# 开启 BBR
+enable_bbr() {
+    echo -e "\n🚀 开启 BBR 加速"
+
+    # 检查内核版本
+    KERNEL_VERSION=$(uname -r | cut -d'-' -f1)
+    if [ "$(printf '%s\n' "$KERNEL_VERSION" "4.9" | sort -V | head -n1)" != "4.9" ]; then
+        echo "❌ 当前内核版本过低 ($KERNEL_VERSION)，需要 >= 4.9"
+        return 1
+    fi
+
+    # 检查 BBR 是否可用
+    if ! sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "bbr"; then
+        echo "❌ BBR 不可用，请检查内核是否支持"
+        return 1
+    fi
+
+    # 写入 sysctl 配置文件
+    SYSCTL_FILE="/etc/sysctl.d/99-bbr.conf"
+    if ! grep -q "net.ipv4.tcp_congestion_control=bbr" "$SYSCTL_FILE" 2>/dev/null; then
+        cat > "$SYSCTL_FILE" <<EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+    fi
+
+    # 应用 sysctl 配置
+    if ! sysctl --system >/dev/null 2>&1; then
+        echo "❌ 应用 sysctl 配置失败"
+        return 1
+    fi
+
+    # 尝试加载 tcp_bbr 模块
+    if ! lsmod | grep -q tcp_bbr; then
+        modprobe tcp_bbr 2>/dev/null || echo "⚠️ 无法加载 tcp_bbr 模块，可能需要重启"
+    fi
+
+    # 验证 BBR 是否启用
+    if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = "bbr" ]; then
+        echo "✅ BBR 已启用"
+    else
+        echo "❌ BBR 启用失败，请手动检查"
+    fi
+}
+
 # 主菜单
 while true; do
     echo -e "\n🧭 Shadowsocks-Rust 管理菜单"
     echo "1) 创建节点"
     echo "2) 删除节点"
+    echo "3) 开启 BBR 加速"
     echo "0) 退出"
     read -p "操作编号：" CHOICE
     case "$CHOICE" in
         1) create_node ;;
         2) delete_node ;;
+        3) enable_bbr ;;
         0) echo "👋 再见！"; exit 0 ;;
         *) echo "❌ 无效选项" ;;
     esac
