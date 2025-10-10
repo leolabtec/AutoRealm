@@ -46,7 +46,7 @@ create_node() {
         [ $i -eq 10 ] && { echo "错误：无可用端口"; exit 1; }
     done
 
-    PASSWORD=$(openssl rand -base64 12 | tr -d '/+=')
+    PASSWORD=$(openssl rand -base64 12 | tr -d '/+=') 
     METHOD="aes-256-gcm"
     LISTEN_ADDR="0.0.0.0"
 
@@ -124,13 +124,33 @@ EOF
     systemctl daemon-reload
     systemctl enable --now "$SERVICE_NAME" || { echo "错误：启动服务失败"; journalctl -u "$SERVICE_NAME" -b; exit 1; }
 
+    # 获取公网 IP
+    if command -v curl &>/dev/null; then
     IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "unknown")
-    [ "$IP" = "unknown" ] && echo "⚠️ 无法获取公网 IP"
+elif command -v wget &>/dev/null; then
+    IP=$(wget -qO- https://api.ipify.org || wget -qO- https://ifconfig.me || echo "unknown")
+else
+    IP="unknown"
+fi
+[ "$IP" = "unknown" ] && echo "⚠️ 无法获取公网 IP"
+
+
+    # 生成 ss:// 链接
     ENCODED=$(echo -n "$METHOD:$PASSWORD@$IP:$PORT" | base64 -w 0)
     echo "$NODE_NAME $PORT $PASSWORD $METHOD" >> "$NODES_LIST"
 
+    # ========== 输出节点信息 ==========
+    SS_LINK="ss://${ENCODED}#${NODE_NAME}"
     echo -e "\n✅ 节点 $NODE_NAME 部署成功"
-    echo "📎 链接: ss://${ENCODED}#${NODE_NAME}"
+    echo "----------------------------------------"
+    echo "$SS_LINK"
+    echo "节点备注: $NODE_NAME"
+    echo "  地址: $IP"
+    echo "  端口: $PORT"
+    echo "  加密方式: $METHOD"
+    echo "  密码: $PASSWORD"
+    echo "  ss://$(echo -n "$METHOD:$PASSWORD" | base64 -w 0)@$IP:$PORT#$NODE_NAME"
+    echo "----------------------------------------"
 }
 
 # 删除节点
