@@ -1,0 +1,195 @@
+#!/bin/bash
+set -e
+
+# ===============================
+# Shadowsocks-libev 一键管理脚本
+# ===============================
+
+CONFIG_DIR="/etc/shadowsocks-libev"
+NODES_LIST="$CONFIG_DIR/nodes.list"
+INSTALL_DIR="/usr/bin"
+
+# 检查 root 权限
+[ "$EUID" -ne 0 ] && { echo "❌ 请以 root 用户运行"; exit 1; }
+
+# 安装依赖
+install_dependencies() {
+    echo "🔧 检查依赖..."
+    local MISSING=()
+    declare -A pkg_commands=( ["curl"]="curl" ["jq"]="jq" ["openssl"]="openssl" ["net-tools"]="ifconfig" )
+    for pkg in "${!pkg_commands[@]}"; do
+        command -v "${pkg_commands[$pkg]}" &>/dev/null || MISSING+=("$pkg")
+    done
+    if [ ${#MISSING[@]} -gt 0 ]; then
+        echo "📥 安装缺失依赖：${MISSING[*]}"
+        apt-get update -y && apt-get install -y --no-install-recommends "${MISSING[@]}" || { echo "错误：安装依赖失败"; exit 1; }
+    else
+        echo "ℹ️ 所有依赖已安装"
+    fi
+}
+
+# 安装 shadowsocks-libev
+install_ss_libev() {
+    if ! command -v ss-server &>/dev/null; then
+        echo "📥 安装 shadowsocks-libev..."
+        apt-get update -y
+        apt-get install -y shadowsocks-libev || { echo "❌ 安装 shadowsocks-libev 失败"; exit 1; }
+    else
+        echo "✅ shadowsocks-libev 已安装"
+    fi
+}
+
+# 创建节点
+create_node() {
+    echo -e "\n📋 创建新节点"
+    read -p "节点名称（留空自动生成）：" NODE_NAME
+    [ -z "$NODE_NAME" ] && NODE_NAME="node$(date +%s | tail -c 3)" && echo "ℹ️ 节点名称：$NODE_NAME"
+
+    CONFIG_FILE="$CONFIG_DIR/node-$NODE_NAME.json"
+    SERVICE_NAME="shadowsocks-libev-$NODE_NAME"
+
+    [ -f "$CONFIG_FILE" ] && { echo "⚠️ 节点 $NODE_NAME 已存在"; return 1; }
+    mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR"
+
+    install_dependencies
+    install_ss_libev
+
+    # 随机端口
+    for i in {1..10}; do
+        PORT=$((RANDOM % 10000 + 10000))
+        ss -tuln | grep -q ":$PORT\b" || break
+        [ $i -eq 10 ] && { echo "错误：无可用端口"; exit 1; }
+    done
+
+    PASSWORD=$(openssl rand -base64 12 | tr -d '/+=')
+    METHOD="aes-256-gcm"
+    LISTEN_ADDR="0.0.0.0"
+
+    # 写入配置文件
+    cat > "$CONFIG_FILE" <<EOF
+{
+    "server": "$LISTEN_ADDR",
+    "server_port": $PORT,
+    "password": "$PASSWORD",
+    "method": "$METHOD",
+    "mode": "tcp_and_udp"
+}
+EOF
+    chmod 600 "$CONFIG_FILE"
+    chown root:root "$CONFIG_FILE"
+
+    echo "🔍 验证配置文件 $CONFIG_FILE..."
+    jq . "$CONFIG_FILE" >/dev/null || { echo "错误：配置文件 JSON 格式无效"; exit 1; }
+
+    # 测试运行
+    echo "🔍 测试配置..."
+    ss-server -c "$CONFIG_FILE" -u >/dev/null 2>&1 & sleep 1; kill $! 2>/dev/null || { echo "错误：配置无效"; exit 1; }
+
+    # 创建 systemd 服务
+    cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
+[Unit]
+Description=Shadowsocks-libev Server ($NODE_NAME)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$INSTALL_DIR/ss-server -c $CONFIG_FILE -u
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now "$SERVICE_NAME" || { echo "❌ 启动失败"; journalctl -u "$SERVICE_NAME" -b; exit 1; }
+
+    IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "unknown")
+    ENCODED=$(echo -n "$METHOD:$PASSWORD@$IP:$PORT" | base64 -w 0)
+    echo "$NODE_NAME $PORT $PASSWORD $METHOD" >> "$NODES_LIST"
+
+    echo -e "\n✅ 节点 $NODE_NAME 部署成功"
+    echo "📎 链接: ss://${ENCODED}#${NODE_NAME}"
+}
+
+# 删除节点
+delete_node() {
+    echo -e "\n🧹 删除节点"
+    local NODES=()
+    if [ -f "$NODES_LIST" ]; then
+        mapfile -t NODES < <(cut -d ' ' -f1 "$NODES_LIST")
+    else
+        mapfile -t NODES < <(find "$CONFIG_DIR" -name 'node-*.json' -exec basename {} \; | sed 's/^node-//;s/\.json$//')
+    fi
+
+    [ ${#NODES[@]} -eq 0 ] && { echo "✅ 无节点可删除"; return; }
+
+    echo "📋 当前节点："
+    for i in "${!NODES[@]}"; do
+        printf "  %2d) %s\n" $((i+1)) "${NODES[$i]}"
+    done
+    echo "   0) 返回"
+    read -p "选择节点编号：" ID
+
+    [ "$ID" = "0" ] && return
+    [[ "$ID" =~ ^[0-9]+$ ]] && (( ID >= 1 && ID <= ${#NODES[@]} )) || { echo "❌ 无效编号"; return; }
+
+    NODE="${NODES[$((ID-1))]}"
+    echo "🧹 删除节点 $NODE..."
+    systemctl stop "shadowsocks-libev-$NODE" 2>/dev/null || true
+    systemctl disable "shadowsocks-libev-$NODE" 2>/dev/null || true
+    rm -f "/etc/systemd/system/shadowsocks-libev-$NODE.service" "$CONFIG_DIR/node-$NODE.json"
+    [ -f "$NODES_LIST" ] && sed -i "/^$NODE /d" "$NODES_LIST"
+    systemctl daemon-reload
+    echo "✅ 节点 $NODE 已删除"
+}
+
+# 开启 BBR
+enable_bbr() {
+    echo -e "\n🚀 开启 BBR 加速"
+
+    KERNEL_VERSION=$(uname -r | cut -d'-' -f1)
+    if [ "$(printf '%s\n' "$KERNEL_VERSION" "4.9" | sort -V | head -n1)" != "4.9" ]; then
+        echo "❌ 当前内核版本过低 ($KERNEL_VERSION)，需要 >= 4.9"
+        return 1
+    fi
+
+    if ! sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "bbr"; then
+        echo "❌ BBR 不可用，请检查内核是否支持"
+        return 1
+    fi
+
+    SYSCTL_FILE="/etc/sysctl.d/99-bbr.conf"
+    if ! grep -q "net.ipv4.tcp_congestion_control=bbr" "$SYSCTL_FILE" 2>/dev/null; then
+        cat > "$SYSCTL_FILE" <<EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+    fi
+
+    sysctl --system >/dev/null 2>&1 || { echo "❌ 应用 sysctl 配置失败"; return 1; }
+
+    modprobe tcp_bbr 2>/dev/null || echo "⚠️ 无法加载 tcp_bbr 模块，可能需要重启"
+
+    if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = "bbr" ]; then
+        echo "✅ BBR 已启用"
+    else
+        echo "❌ BBR 启用失败，请手动检查"
+    fi
+}
+
+# 主菜单
+while true; do
+    echo -e "\n🧭 Shadowsocks-libev 管理菜单"
+    echo "1) 创建节点"
+    echo "2) 删除节点"
+    echo "3) 开启 BBR 加速"
+    echo "0) 退出"
+    read -p "操作编号：" CHOICE
+    case "$CHOICE" in
+        1) create_node ;;
+        2) delete_node ;;
+        3) enable_bbr ;;
+        0) echo "👋 再见！"; exit 0 ;;
+        *) echo "❌ 无效选项" ;;
+    esac
+done
