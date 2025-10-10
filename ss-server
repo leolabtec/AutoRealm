@@ -2,7 +2,7 @@
 set -e
 
 # ===============================
-# Shadowsocks-libev 一键管理脚本
+# Shadowsocks-libev 一键管理脚本（带明文打印）
 # ===============================
 
 CONFIG_DIR="/etc/shadowsocks-libev"
@@ -103,12 +103,27 @@ EOF
     systemctl daemon-reload
     systemctl enable --now "$SERVICE_NAME" || { echo "❌ 启动失败"; journalctl -u "$SERVICE_NAME" -b; exit 1; }
 
+    # 获取公网 IP
     IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "unknown")
+
+    # 生成 base64 链接
     ENCODED=$(echo -n "$METHOD:$PASSWORD@$IP:$PORT" | base64 -w 0)
+    SS_LINK="ss://${ENCODED}#${NODE_NAME}"
+
+    # 保存节点信息
     echo "$NODE_NAME $PORT $PASSWORD $METHOD" >> "$NODES_LIST"
 
+    # 打印明文信息
     echo -e "\n✅ 节点 $NODE_NAME 部署成功"
-    echo "📎 链接: ss://${ENCODED}#${NODE_NAME}"
+    echo "----------------------------------------"
+    echo "$SS_LINK"
+    echo "节点备注: $NODE_NAME"
+    echo "  地址: $IP"
+    echo "  端口: $PORT"
+    echo "  加密方式: $METHOD"
+    echo "  密码: $PASSWORD"
+    echo "  ss://$(echo -n "$METHOD:$PASSWORD" | base64 -w 0)@$IP:$PORT#$NODE_NAME"
+    echo "----------------------------------------"
 }
 
 # 删除节点
